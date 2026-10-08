@@ -28,4 +28,5 @@ To use a folder, add its link in Memento's External Scripts, e.g. `github.com/Sh
 
 - `helpers/milo-web.js` (MiloWeb 1.1): web requests that never fail silently.
 - `helpers/milo-secrets.js` (MiloSecrets 1.0): reads values from the Secrets library by entry name.
-- `data-sources/milo-barcode.js` (MiloBarcode 1.1): barcode autofill from your own library, Open Food Facts, EAN-Search and UPCitemdb.
+- `helpers/milo-products.js` (MiloProducts 1.0): the Barcode Products master library - scanning checks it first, it remembers what you save, and it keeps every library's entries matching it.
+- `data-sources/milo-barcode.js` (MiloBarcode 1.2): barcode autofill from Barcode Products first, then Open Food Facts, EAN-Search and UPCitemdb.

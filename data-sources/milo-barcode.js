@@ -1,7 +1,7 @@
-/* milo-barcode.js  v1.1  2026-10-06  (replaces barcode.js v1.0)
+/* milo-barcode.js  v1.2  2026-10-08  (replaces barcode.js v1.0)
    MiloBarcode: the barcode autofill engine for Memento custom sources.
    Looks a scanned barcode up in this order, and stops at the first that knows it:
-     1. your own library (only if you set ownLibrary)
+     1. your product library (only if you set ownLibrary - normally MiloProducts.source())
      2. Open Food Facts - food, drink, beauty, pet food and other products
      3. EAN-Search (only if you give it a token)
      4. UPCitemdb (by default only when nothing above matched)
@@ -10,20 +10,20 @@
 
    The whole Custom source script inside Memento:
      var email = MiloSecrets.get("OFF_CONTACT_EMAIL");
-     result(new MiloBarcode({ contactEmail: email }).search(query));
+     result(new MiloBarcode({ contactEmail: email, ownLibrary: MiloProducts.source() }).search(query));
 
    Options (all optional):
      contactEmail   - sent to Open Food Facts, which asks every app for a contact
      upcItemDb      - "fallback" (default), "always" or "off"
      eanSearchToken - EAN-Search token; leave it out to skip EAN-Search
-     ownLibrary     - { name: "Autofill Barcode", barcodeField: "Barcode Text",
-                        fields: { name: "Name", brand: "Brand", ... } }
-     testMode       - true adds a "Test" row per source showing what came back
+     ownLibrary     - { name, label, barcodeField, fields: { name: "Name", ... }, isThisLibrary }
      testBarcode    - used when there is no scan, e.g. the editor's Run button
 
-   Every product row carries these properties for the autofill mapping rules:
-     name, brand, size, category, type, ingredients, description, image, link,
-     source, barcode, code, details
+   The pick list shows products only. Every row carries these properties for the
+   autofill mapping rules:
+     name, brand, size, category, type, ingredients, description, image, imageLink,
+     link, source, barcode, code, details, lookupLog, lookupProblem
+   lookupLog says what each source answered, in full; lookupProblem is "Yes" or "No".
 
    Defines one global name (MiloBarcode) and runs nothing when Memento loads it. */
 
@@ -33,22 +33,27 @@ function MiloBarcode(options) {
   this.upcItemDb = options.upcItemDb || "fallback";
   this.eanSearchToken = MiloBarcode.text(options.eanSearchToken);
   this.ownLibrary = options.ownLibrary || null;
-  this.testMode = options.testMode === true;
   this.testBarcode = MiloBarcode.text(options.testBarcode) || "3068320080000";
 }
 
-MiloBarcode.version = "1.1";
+MiloBarcode.version = "1.2";
 
 MiloBarcode.prototype.search = function (scanned) {
   if (typeof MiloWeb === "undefined") {
-    return [MiloBarcode.problemRow("milo-web.js isn't ticked - tick it under this script's JavaScript libraries", 0)];
+    return [MiloBarcode.problemRow("milo-web.js isn't ticked - tick it under this script's JavaScript libraries")];
   }
   var job = this.startJob(scanned);
   this.addRows(job, this.lookupOwnLibrary(job));
+  if (job.stop) return this.finishJob(job);
   if (job.rows.length === 0) this.addRows(job, this.lookupOpenFoodFacts(job));
-  if (job.rows.length === 0 && this.eanSearchToken !== "") this.addRows(job, this.lookupEanSearch(job));
+  else job.log.push("Open Food Facts: not asked - already found");
+  if (this.eanSearchToken === "") job.log.push("EAN-Search: not used - no token given");
+  else if (job.rows.length === 0) this.addRows(job, this.lookupEanSearch(job));
+  else job.log.push("EAN-Search: not asked - already found");
   if (this.upcItemDb === "always" || (this.upcItemDb === "fallback" && job.rows.length === 0)) {
     this.addRows(job, this.lookupUpcItemDb(job));
+  } else {
+    job.log.push("UPCitemdb: " + (this.upcItemDb === "off" ? "switched off" : "not asked - already found"));
   }
   return this.finishJob(job);
 };
@@ -57,27 +62,40 @@ MiloBarcode.prototype.search = function (scanned) {
 
 MiloBarcode.prototype.lookupOwnLibrary = function (job) {
   var own = this.ownLibrary;
-  if (!own || !own.name || !own.barcodeField) return [];
+  if (!own || !own.name || !own.barcodeField) {
+    job.log.push("Your product library: not used");
+    return [];
+  }
+  var label = own.label || own.name;
   var library = null;
   try { library = libByName(own.name); } catch (e) { library = null; }
   if (!library) {
-    job.problems.push("Your library: can't open " + own.name + " - tick it under this library's script permissions (Libraries)");
+    MiloBarcode.problem(job, label + ": can't open it - tick it under this library's script permissions (Libraries)");
     return [];
   }
   var found;
   try {
     found = MiloBarcode.listItems(library.find(job.code));
   } catch (e2) {
-    job.problems.push("Your library: the search failed (" + MiloWeb.safeMessage(e2) + ")");
+    MiloBarcode.problem(job, label + ": the search failed (" + MiloWeb.safeMessage(e2) + ")");
     return [];
   }
   var rows = [];
   var i;
   for (i = 0; i < found.length && rows.length < 3; i++) {
-    var stored = MiloBarcode.text(found[i].field(own.barcodeField)).replace(/[^0-9]/g, "");
-    if (stored === job.code) rows.push(this.ownRow(job, found[i], own));
+    var stored = MiloBarcode.read(found[i], own.barcodeField);
+    if (stored.replace(/[^0-9]/g, "") === job.code || stored === job.scanned) rows.push(this.ownRow(job, found[i], own, label));
   }
-  this.noteTest(job, "Your library", null, rows.length + " match(es) out of " + found.length + " search result(s)");
+  job.log.push(label + ": " + (rows.length ? "found" : "no match") + " (" + found.length + " search result(s) checked)");
+  if (rows.length && own.isThisLibrary) {
+    job.stop = true;
+    return [{
+      title: "Already in " + label + ": " + rows[0].name,
+      desc: "Open the existing entry instead - a second one can't be saved",
+      id: "already:" + job.code,
+      barcode: job.scanned, code: job.code
+    }];
+  }
   return rows;
 };
 
@@ -88,14 +106,19 @@ MiloBarcode.prototype.lookupOpenFoodFacts = function (job) {
     "User-Agent": "MiloBarcode/" + MiloBarcode.version + " (" + (this.contactEmail || "no contact given") + ")",
     "Accept": "application/json"
   });
-  this.noteTest(job, "Open Food Facts", reply, "");
-  if (reply.code === 404 && reply.error === "") return [];
   var product = reply.json && reply.json.product;
-  if (reply.code === 200 && product) return [this.offRow(job, product)];
+  if (reply.code === 200 && product) {
+    job.log.push("Open Food Facts: found (" + MiloBarcode.replyFacts(reply) + ")");
+    return [this.offRow(job, product)];
+  }
+  if (reply.code === 404 && reply.error === "") {
+    job.log.push("Open Food Facts: not in its database (HTTP 404)");
+    return [];
+  }
   if (reply.code === 200 && reply.json !== null) {
-    job.problems.push("Open Food Facts: the reply had no product in it");
+    MiloBarcode.problem(job, "Open Food Facts: the reply had no product in it (" + MiloBarcode.replyFacts(reply) + ")");
   } else {
-    job.problems.push(MiloWeb.describe("Open Food Facts", reply));
+    MiloBarcode.problem(job, MiloWeb.describe("Open Food Facts", reply) + MiloBarcode.replyTail(reply));
   }
   return [];
 };
@@ -104,59 +127,65 @@ MiloBarcode.prototype.lookupEanSearch = function (job) {
   var url = "https://api.ean-search.org/api?token=" + encodeURIComponent(this.eanSearchToken) +
             "&op=barcode-lookup&format=json&ean=" + encodeURIComponent(job.code);
   var reply = MiloWeb.getJson(url, { "Accept": "application/json" });
-  this.noteTest(job, "EAN-Search", reply, "");
   var list = reply.json;
   if (list && list.length && list[0].error) {
     /* EAN-Search reports problems as [{ "error": "..." }], e.g. "Invalid token". */
-    if (!/not found/i.test(String(list[0].error))) job.problems.push("EAN-Search: " + MiloBarcode.text(list[0].error));
+    if (/not found/i.test(String(list[0].error))) {
+      job.log.push("EAN-Search: not in its database");
+    } else {
+      MiloBarcode.problem(job, "EAN-Search: " + MiloBarcode.text(list[0].error));
+    }
     return [];
   }
   if (reply.code !== 200 || !list) {
-    job.problems.push(MiloWeb.describe("EAN-Search", reply));
+    MiloBarcode.problem(job, MiloWeb.describe("EAN-Search", reply) + MiloBarcode.replyTail(reply));
     return [];
   }
   var rows = [];
   var i;
   for (i = 0; i < list.length && i < 3; i++) rows.push(this.eanRow(job, list[i]));
+  job.log.push("EAN-Search: " + (rows.length ? "found " + rows.length : "no products") + " (" + MiloBarcode.replyFacts(reply) + ")");
   return rows;
 };
 
 MiloBarcode.prototype.lookupUpcItemDb = function (job) {
   var reply = MiloWeb.getJson("https://api.upcitemdb.com/prod/trial/lookup?upc=" + encodeURIComponent(job.code),
                               { "Accept": "application/json" });
-  this.noteTest(job, "UPCitemdb", reply, "");
   if (reply.code === 200 && reply.json) {
     var items = reply.json.items || [];
     var rows = [];
     var i;
     for (i = 0; i < items.length && i < 3; i++) rows.push(this.upcRow(job, items[i]));
+    job.log.push("UPCitemdb: " + (rows.length ? "found " + rows.length : "not in its database") + " (" + MiloBarcode.replyFacts(reply) + ")");
     return rows;
   }
   if (reply.code === 429) {
-    job.problems.push("UPCitemdb: too many scans - wait 10 seconds (free limit: 6 a minute, 100 a day)");
+    MiloBarcode.problem(job, "UPCitemdb: too many scans - wait 10 seconds (free limit: 6 a minute, 100 a day)");
   } else if (reply.code === 400) {
-    job.problems.push("UPCitemdb: says this is not a valid barcode - try scanning again");
+    MiloBarcode.problem(job, "UPCitemdb: says this is not a valid barcode - try scanning again");
   } else {
-    job.problems.push(MiloWeb.describe("UPCitemdb", reply));
+    MiloBarcode.problem(job, MiloWeb.describe("UPCitemdb", reply) + MiloBarcode.replyTail(reply));
   }
   return [];
 };
 
 /* ---------- turning each source's data into pick-list rows ---------- */
 
-MiloBarcode.prototype.ownRow = function (job, entry, own) {
+MiloBarcode.prototype.ownRow = function (job, entry, own, label) {
   var map = own.fields || {};
-  var d = { source: "Your library (" + own.name + ")", code: job.code };
-  var properties = ["name", "brand", "size", "category", "type", "ingredients", "description", "link", "details"];
+  var d = { code: job.code };
+  var properties = ["name", "brand", "size", "category", "type", "ingredients", "description", "link", "imageLink", "source"];
   var i;
   for (i = 0; i < properties.length; i++) {
     var fieldName = map[properties[i]];
-    d[properties[i]] = fieldName ? MiloBarcode.text(entry.field(fieldName)) : "";
+    d[properties[i]] = fieldName ? MiloBarcode.read(entry, fieldName) : "";
   }
+  /* Keep where the data first came from (e.g. Open Food Facts); the Lookup Log says it came via your library. */
+  d.source = d.source || label;
   d.name = d.name || "(no name in your entry)";
-  var row = this.makeRow(job, d);
-  if (map.details) row.details = d.details;
-  return row;
+  d.image = d.imageLink;
+  d.thumb = d.imageLink;
+  return this.makeRow(job, d);
 };
 
 MiloBarcode.prototype.offRow = function (job, p) {
@@ -221,14 +250,6 @@ MiloBarcode.prototype.upcRow = function (job, item) {
 };
 
 MiloBarcode.prototype.makeRow = function (job, d) {
-  var lines = [];
-  MiloBarcode.addLine(lines, "Brand", d.brand);
-  MiloBarcode.addLine(lines, "Size", d.size);
-  MiloBarcode.addLine(lines, "Category", d.category);
-  MiloBarcode.addLine(lines, "Type", d.type);
-  MiloBarcode.addLine(lines, "Ingredients", d.ingredients);
-  MiloBarcode.addLine(lines, "Description", d.description);
-  MiloBarcode.addLine(lines, "Found in", d.source);
   var subtitle = [];
   if (d.brand) subtitle.push(d.brand);
   if (d.size) subtitle.push(d.size);
@@ -246,12 +267,26 @@ MiloBarcode.prototype.makeRow = function (job, d) {
     ingredients: d.ingredients || "",
     description: d.description || "",
     image: d.image || "",
+    imageLink: d.image || "",
     link: d.link || "",
     source: d.source,
     barcode: job.scanned,
     code: d.code,
-    details: lines.join("\n")
+    details: MiloBarcode.details(d)
   };
+};
+
+/* The summary text for a "Details" field. MiloProducts uses the same layout. */
+MiloBarcode.details = function (d) {
+  var lines = [];
+  MiloBarcode.addLine(lines, "Brand", d.brand);
+  MiloBarcode.addLine(lines, "Size", d.size);
+  MiloBarcode.addLine(lines, "Category", d.category);
+  MiloBarcode.addLine(lines, "Type", d.type);
+  MiloBarcode.addLine(lines, "Ingredients", d.ingredients);
+  MiloBarcode.addLine(lines, "Description", d.description);
+  MiloBarcode.addLine(lines, "Found in", d.source);
+  return lines.join("\n");
 };
 
 /* ---------- one search, start to finish ---------- */
@@ -264,12 +299,16 @@ MiloBarcode.prototype.startJob = function (scanned) {
     scanned: used,
     code: digits.length >= 8 ? digits : used,
     isTestRun: raw === "",
+    stop: false,
     rows: [],
     problems: [],
-    testNotes: []
+    log: []
   };
-  if (this.contactEmail === "" && typeof MiloSecrets !== "undefined" && MiloSecrets.problem) {
-    job.problems.push("Contact email: " + MiloSecrets.problem);
+  job.log.push("Lookup " + MiloBarcode.now() + " for " + job.code + (job.isTestRun ? " (test run - no scan)" : "") +
+               " - MiloBarcode " + MiloBarcode.version + ", MiloWeb " + MiloWeb.version);
+  if (this.contactEmail === "") {
+    var why = (typeof MiloSecrets !== "undefined" && MiloSecrets.problem) ? MiloSecrets.problem : "none given";
+    MiloBarcode.problem(job, "Contact email for Open Food Facts: " + why);
   }
   return job;
 };
@@ -279,35 +318,26 @@ MiloBarcode.prototype.addRows = function (job, rows) {
   for (i = 0; i < rows.length; i++) job.rows.push(rows[i]);
 };
 
-MiloBarcode.prototype.noteTest = function (job, sourceName, reply, note) {
-  if (!this.testMode) return;
-  var text = note;
-  if (reply) {
-    text = reply.error ? reply.error :
-      "HTTP " + reply.code + ", " + reply.text.length + " characters, starts: " + MiloWeb.preview(reply.text);
-  }
-  job.testNotes.push("Test - " + sourceName + ": " + text);
-};
-
 MiloBarcode.prototype.finishJob = function (job) {
   var rows = job.rows;
   var i;
   if (rows.length === 0) {
     var failed = job.problems.length > 0;
     rows.push({
-      title: (failed ? "Could not look up " : "No match for ") + job.code,
-      desc: failed ? "See the Problem row(s) below" : "No source knows this barcode - type the details in yourself",
+      title: failed ? "Could not look up " + job.code + " - pick it, then read Lookup Log"
+                    : "No match for " + job.code + " - pick it, then type the details in",
+      desc: failed ? "Something went wrong - Lookup Log says what" : "No source knows this barcode",
       id: "none:" + job.code,
       name: "", details: "", source: "Not found",
       barcode: job.scanned, code: job.code
     });
   }
-  for (i = 0; i < job.problems.length; i++) rows.push(MiloBarcode.problemRow(job.problems[i], i));
-  for (i = 0; i < job.testNotes.length; i++) {
-    rows.push({ title: job.testNotes[i], desc: "Test mode is on - set testMode: false to hide these rows", id: "test:" + i });
-  }
-  if (job.isTestRun) {
-    for (i = 0; i < rows.length; i++) rows[i].title = "[TEST " + job.code + "] " + rows[i].title;
+  var log = job.log.join("\n");
+  var problem = job.problems.length > 0 ? "Yes" : "No";
+  for (i = 0; i < rows.length; i++) {
+    rows[i].lookupLog = log;
+    rows[i].lookupProblem = problem;
+    if (job.isTestRun) rows[i].title = "[TEST " + job.code + "] " + rows[i].title;
   }
   return rows;
 };
@@ -320,8 +350,35 @@ MiloBarcode.OFF_SOURCE = { food: "Open Food Facts", beauty: "Open Beauty Facts",
 MiloBarcode.OFF_SITE = { food: "openfoodfacts.org", beauty: "openbeautyfacts.org", petfood: "openpetfoodfacts.org", product: "openproductsfacts.org" };
 MiloBarcode.OFF_TYPE = { food: "Food & drink", beauty: "Beauty & personal care", petfood: "Pet food", product: "Other product" };
 
-MiloBarcode.problemRow = function (message, index) {
-  return { title: "Problem: " + message, desc: "Information only - this row has no product data", id: "problem:" + index };
+MiloBarcode.problem = function (job, message) {
+  job.problems.push(message);
+  job.log.push("PROBLEM - " + message);
+};
+
+MiloBarcode.problemRow = function (message) {
+  return { title: "Problem: " + message, desc: "Information only - this row has no product data", id: "problem:0" };
+};
+
+MiloBarcode.replyFacts = function (reply) {
+  return "HTTP " + reply.code + ", " + reply.text.length + " characters";
+};
+
+MiloBarcode.replyTail = function (reply) {
+  return reply.error ? "" : " - " + MiloBarcode.replyFacts(reply) + ", starts: " + MiloWeb.preview(reply.text);
+};
+
+MiloBarcode.read = function (entry, fieldName) {
+  try {
+    return MiloBarcode.text(entry.field(fieldName));
+  } catch (e) {
+    return "";
+  }
+};
+
+MiloBarcode.now = function () {
+  var d = new Date();
+  var two = function (n) { return (n < 10 ? "0" : "") + n; };
+  return two(d.getDate()) + "/" + two(d.getMonth() + 1) + "/" + d.getFullYear() + " " + two(d.getHours()) + ":" + two(d.getMinutes());
 };
 
 MiloBarcode.text = function (value) {

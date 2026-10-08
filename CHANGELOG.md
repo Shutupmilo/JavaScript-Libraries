@@ -2,6 +2,11 @@
 
 Newest first. One entry per push.
 
+## 2026-10-08 - MiloBarcode 1.2 and MiloProducts 1.0: the Barcode Products master library
+
+- `data-sources/milo-barcode.js` 1.2 (MiloBarcode): the pick list shows products only - no Test or Problem rows. Every row carries `lookupLog` (what each source answered, in full), `lookupProblem` ("Yes" or "No") and `imageLink` (the picture's web address). Checks Barcode Products first; inside Barcode Products itself it says "Already in Barcode Products" instead of offering a duplicate. The `testMode` option is gone - the Lookup Log replaces it.
+- Added `helpers/milo-products.js` 1.0 (MiloProducts): the Barcode Products settings in one place. `remember()` copies what you save in a scanning library into Barcode Products; `spread()` updates every entry with that barcode in every listed library. An empty field never wipes saved data, and only fields that differ are changed, so updates can't loop.
+
 ## 2026-10-07 - MiloWeb 1.1: fix for Open Food Facts failing on the phone
 
 - Cause, reproduced in Rhino 1.9.1 (Memento's engine): Memento's web client only accepts plain text in request headers. Text joined with `+` is stored as a Rhino "ConsString", so every Open Food Facts request failed with "Can't execute http get request". Open Food Facts was the only source with a joined header (the User-Agent carrying the contact email).
