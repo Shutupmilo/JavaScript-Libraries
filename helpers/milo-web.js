@@ -1,4 +1,4 @@
-/* milo-web.js  v1.0  2026-10-06
+/* milo-web.js  v1.1  2026-10-07
    MiloWeb: web requests for Memento scripts that never fail silently.
    Needs: the calling library's Network permission.
 
@@ -15,7 +15,7 @@
 
 var MiloWeb = {
 
-  version: "1.0",
+  version: "1.1",
 
   getJson: function (url, headers) {
     var reply = { code: 0, json: null, text: "", error: "" };
@@ -47,9 +47,12 @@ var MiloWeb = {
     /* Ask for uncompressed replies: a compressed reply may not be unpacked on the phone. */
     var all = { "Accept-Encoding": "identity" };
     var name;
+    /* Memento's web client only accepts plain text here. Text joined with + is stored in a
+       different internal form (a Rhino "ConsString") and makes the whole request fail with
+       "Can't execute http get request", so turn every name and value into plain text. */
     if (headers) {
       for (name in headers) {
-        if (headers.hasOwnProperty(name)) all[name] = headers[name];
+        if (headers.hasOwnProperty(name)) all[String(name)] = String(headers[name]);
       }
     }
     try {
@@ -87,10 +90,25 @@ var MiloWeb = {
   },
 
   safeMessage: function (error) {
-    /* Web addresses can carry tokens after the "?", so never show that part. */
-    var message = MiloWeb.oneLine(error && error.message ? error.message : error);
+    /* Show the underlying cause rather than Memento's general wrapper. Web addresses can
+       carry tokens after the "?", so never show that part. */
+    var message = MiloWeb.oneLine(MiloWeb.rootCause(error));
     message = message.replace(/\?[^\s)]*/g, "?...");
-    return MiloWeb.cut(message, 120);
+    return MiloWeb.cut(message, 160);
+  },
+
+  rootCause: function (error) {
+    var text = MiloWeb.oneLine(error && error.message ? error.message : error);
+    try {
+      var cause = error && error.javaException ? error.javaException : null;
+      if (!cause && error instanceof java.lang.Throwable) cause = error;
+      var deepest = cause;
+      while (cause) { deepest = cause; cause = cause.getCause(); }
+      if (deepest) text = String(deepest);
+    } catch (e) {
+      /* This Memento build hides Java details; keep the plain message. */
+    }
+    return text.replace(/\b(javax?|org|com|android)\.[a-z.]*\.(?=[A-Z])/g, "");
   },
 
   preview: function (text) {
